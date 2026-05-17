@@ -18,17 +18,27 @@ public static class ScoreValidator
         };
 
         var rawNotes = input.GetNotesAsList();
-        var validNotes = new List<NoteEvent>();
+        var validNotes = new List< NoteEvent > ();
 
-        // 1. 音域过滤 + 调式过滤
+        // 1. 调式校验 + 格式清理
         var allowedKeys = GetAllowedKeys(keySignature);
 
         foreach (var note in rawNotes)
         {
             if (note.key_number < 1 || note.key_number > 88) continue;
 
-            if (!allowedKeys.Contains(note.key_number))
+            // 【关键修改】左手伴奏（低音区）强制调内音，保证和弦和谐
+            if (note.key_number <= 43 && !allowedKeys.Contains(note.key_number))
                 note.key_number = SnapToNearest(note.key_number, allowedKeys);
+            // 右手旋律：允许黑键作为经过音/色彩音，只有偏离调内音超过1个半音才修正
+            else if (note.key_number >= 44 && !allowedKeys.Contains(note.key_number))
+            {
+                int nearest = SnapToNearest(note.key_number, allowedKeys);
+                // 与最近调内音距离 > 1 个半音，说明不是合理的经过音，强制修正
+                if (Mathf.Abs(note.key_number - nearest) > 2)
+                    note.key_number = nearest;
+                // 否则保留黑键（如 D# 作为 D→E 的经过音）
+            }
 
             note.velocity = Mathf.Clamp(note.velocity, 1, 127);
             note.duration_tick = Mathf.Max(1, Mathf.Min(note.duration_tick, 32));
@@ -36,22 +46,21 @@ public static class ScoreValidator
             validNotes.Add(note);
         }
 
-        // 2. 密度过滤：同一 tick 最多 6 个音
+        // 2. 密度过滤（同一 tick 最多 6 个音）
         validNotes = FilterDensity(validNotes, 6);
 
-        // 3. 强制右手旋律单音/双音约束（禁止三音以上和弦）
+        // 3. 强制旋律单音/双音约束（防止和弦堆叠混乱）
         validNotes = EnforceMelodySingleNote(validNotes);
 
         // 4. 时间排序
         validNotes.Sort((a, b) => a.start_tick.CompareTo(b.start_tick));
 
-        // 5. 琶音标记（根据左右手和和弦类型智能分配）
+        // 5. 琶音标记
         MarkArpeggio(validNotes);
 
         output.notes = validNotes.ToArray();
         return output;
     }
-
     static List<int> GetAllowedKeys(string keySig)
     {
         bool isMinor = keySig.EndsWith("m") || keySig.Contains("小调");

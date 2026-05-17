@@ -174,13 +174,17 @@ public class ScorePlayer : MonoBehaviour
         if (key == null) return;
 
         key.PressVisual(true);
-        AudioManager.Instance.PlayNote(midi, volume);
+        SF2AudioManager.Instance.PlayNote(midi, volume);
         StartCoroutine(ReleaseVisual(key, note.visualDuration));
     }
 
     IEnumerator ReleaseVisual(PianoKey key, float delay)
     {
         yield return new WaitForSeconds(delay);
-        if (key != null) key.PressVisual(false);
+        if (key != null)
+        {
+            key.PressVisual(false);
+            SF2AudioManager.Instance.StopNote(key.midiNote);
+        }
     }
 }

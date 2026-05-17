@@ -60,26 +60,32 @@ public class PianoKey : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         globalMouseDown = true;
         lastPressedKey = this;
         PressVisual(true);
-        AudioManager.Instance.PlayNote(midiNote);
+        SF2AudioManager.Instance.PlayNote(midiNote);
     }
 
     public void OnPointerUp(PointerEventData eventData)
     {
         globalMouseDown = false;
         PressVisual(false);
+        SF2AudioManager.Instance.StopNote(midiNote);  // 恢复自然衰减，不是立即Kill
         if (lastPressedKey == this) lastPressedKey = null;
     }
+
 
     public void OnPointerEnter(PointerEventData eventData)
     {
         if (globalMouseDown && lastPressedKey != this)
         {
+            // 关键修复：滑动到新键时，先停止旧键的声音（自然衰减）
             if (lastPressedKey != null)
+            {
                 lastPressedKey.PressVisual(false);
+                SF2AudioManager.Instance.StopNote(lastPressedKey.midiNote);
+            }
 
             lastPressedKey = this;
             PressVisual(true);
-            AudioManager.Instance.PlayNote(midiNote);
+            SF2AudioManager.Instance.PlayNote(midiNote);
         }
     }
 
@@ -88,6 +94,7 @@ public class PianoKey : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
         if (globalMouseDown && lastPressedKey == this)
         {
             PressVisual(false);
+            SF2AudioManager.Instance.StopNote(midiNote);  // 恢复自然衰减
             lastPressedKey = null;
         }
     }
@@ -102,12 +109,13 @@ public class PianoKey : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, I
     public void TriggerAutoPlay(float duration)
     {
         PressVisual(true);
-        AudioManager.Instance.PlayNote(midiNote);
+        SF2AudioManager.Instance.PlayNote(midiNote);
         Invoke(nameof(ReleaseAutoPlay), duration);
     }
 
     void ReleaseAutoPlay()
     {
         PressVisual(false);
+        SF2AudioManager.Instance.StopNote(midiNote);
     }
 }

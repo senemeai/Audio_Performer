@@ -43,6 +43,7 @@ public class PianoKeyboard : MonoBehaviour
                 keys[i].PressVisual(false);
         }
         PianoKey.ResetGlobalState();
+        SF2AudioManager.Instance?.StopAllNotes(); // 兜底：停止所有还在响的音
     }
     // ============================================
     void GenerateKeys()
