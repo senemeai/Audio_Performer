@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Security.Cryptography;
 
+
 public class LoginRegisterManager : MonoBehaviour
 {
     [Header("Ãæ°å")]
@@ -28,7 +29,7 @@ public class LoginRegisterManager : MonoBehaviour
 
     private static string SAVE_KEY = "MusicPlayer_UserDB";
     public static UserData CurrentUser { get; private set; }
-
+    public static void Logout() => CurrentUser = null;
     void Start()
     {
         if (panelLogin == null || panelRegister == null)

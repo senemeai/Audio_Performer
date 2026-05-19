@@ -2,7 +2,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.IO;
 using MeltySynth;
-
+using System.Text;  // 如果已有就不加
 public class SF2AudioManager : MonoBehaviour
 {
     public static SF2AudioManager Instance;
@@ -14,6 +14,9 @@ public class SF2AudioManager : MonoBehaviour
     private AudioSource audioSource;
     private float[] left;
     private float[] right;
+    private bool isRecording = false;
+    private List<float> recordingBuffer = new List<float>();
+    private int recordingSampleRate = 44100;
 
     // GM 音色号映射表（修正版，补全缺失 key）
     public static readonly Dictionary<string, int> InstrumentMap = new Dictionary<string, int>
@@ -63,6 +66,7 @@ public class SF2AudioManager : MonoBehaviour
         }
 
         int sampleRate = AudioSettings.outputSampleRate;
+        recordingSampleRate = sampleRate;
         synthesizer = new Synthesizer(path, sampleRate);
 
         // 默认钢琴
@@ -104,6 +108,16 @@ public class SF2AudioManager : MonoBehaviour
             data[i * channels] = left[i];
             if (channels > 1)
                 data[i * channels + 1] = right[i];
+        }
+
+        // 录音：缓存最终混音输出
+        if (isRecording)
+        {
+            lock (recordingBuffer)
+            {
+                for (int i = 0; i < data.Length; i++)
+                    recordingBuffer.Add(data[i]);
+            }
         }
     }
 
@@ -153,7 +167,80 @@ public class SF2AudioManager : MonoBehaviour
     {
         return "piano";
     }
+    public void StartRecording()
+    {
+        if (isRecording) return;
+        lock (recordingBuffer) { recordingBuffer.Clear(); }
+        isRecording = true;
+        Debug.Log("[SF2AudioManager] 开始录音");
+    }
 
+    public void StopRecording(string filePath)
+    {
+        if (!isRecording) return;
+        isRecording = false;
+
+        float[] samplesToWrite;
+        lock (recordingBuffer)
+        {
+            samplesToWrite = recordingBuffer.ToArray();
+            recordingBuffer.Clear();
+        }
+
+        if (samplesToWrite.Length == 0)
+        {
+            Debug.LogWarning("[SF2AudioManager] 录音为空");
+            return;
+        }
+
+        WriteWavFile(filePath, samplesToWrite, recordingSampleRate);
+        Debug.Log($"[SF2AudioManager] 录音已保存: {filePath}");
+    }
+
+    public void DiscardRecording()
+    {
+        isRecording = false;
+        lock (recordingBuffer) { recordingBuffer.Clear(); }
+        Debug.Log("[SF2AudioManager] 录音已丢弃");
+    }
+
+    private void WriteWavFile(string path, float[] data, int sampleRate)
+    {
+        // data 是交错立体声 float，转为 16bit PCM
+        byte[] pcmData = new byte[data.Length * 2];
+        for (int i = 0; i < data.Length; i++)
+        {
+            short sample = (short)Mathf.Clamp(data[i] * 32767f, -32768f, 32767f);
+            pcmData[i * 2] = (byte)(sample & 0xFF);
+            pcmData[i * 2 + 1] = (byte)((sample >> 8) & 0xFF);
+        }
+
+        using (FileStream fs = new FileStream(path, FileMode.Create))
+        using (BinaryWriter writer = new BinaryWriter(fs))
+        {
+            int channels = 2;
+            int bitsPerSample = 16;
+            int byteRate = sampleRate * channels * bitsPerSample / 8;
+            int blockAlign = channels * bitsPerSample / 8;
+            int totalDataLen = pcmData.Length;
+            int fileSize = 36 + totalDataLen;
+
+            writer.Write(Encoding.ASCII.GetBytes("RIFF"));
+            writer.Write(fileSize);
+            writer.Write(Encoding.ASCII.GetBytes("WAVE"));
+            writer.Write(Encoding.ASCII.GetBytes("fmt "));
+            writer.Write(16);
+            writer.Write((short)1);
+            writer.Write((short)channels);
+            writer.Write(sampleRate);
+            writer.Write(byteRate);
+            writer.Write((short)blockAlign);
+            writer.Write((short)bitsPerSample);
+            writer.Write(Encoding.ASCII.GetBytes("data"));
+            writer.Write(totalDataLen);
+            writer.Write(pcmData);
+        }
+    }
     void OnDestroy()
     {
         if (audioSource != null && audioSource.clip != null)

@@ -47,13 +47,13 @@ public class AIChatManager : MonoBehaviour
 
     private string userStartNote = "";
     private string parsedKeySignature = "";
-
+    private ScrollRect chatScrollRect;
     void Start()
     {
         chatPanel.SetActive(false);
         SetupStyleDropdown();
         SetupButtons();
-
+        chatScrollRect = chatPanel.GetComponentInChildren < ScrollRect > (true);
         // 关键修改：导入按钮始终显示，其他乐谱控制按钮默认隐藏
         btnImportScore.gameObject.SetActive(true);
         SetMusicControlButtonsActive(false);
@@ -118,9 +118,32 @@ public class AIChatManager : MonoBehaviour
         sessionTotalBars = 0;
 
         AppendChat("AI", " 正在为您编曲，请稍候...", "#FFCC66");
-        StartCoroutine(RequestAI(msg));
-    }
 
+        // 修改：构建带约束的用户消息
+        string finalUserMessage = BuildUserMessage(msg);
+        StartCoroutine(RequestAI(finalUserMessage));
+    }
+    string BuildUserMessage(string originalMsg)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(originalMsg);
+
+        // 用户明确指定的约束 → 强制
+        if (!string.IsNullOrEmpty(parsedKeySignature))
+        {
+            sb.AppendLine($"【强制约束】调式必须是 {currentKeySignature}，禁止擅自更改。");
+        }
+        if (!string.IsNullOrEmpty(userStartNote))
+        {
+            sb.AppendLine($"【强制约束】起始音必须是 {userStartNote}（key_number={GetKeyNumberFromName(userStartNote)}）。");
+        }
+
+        // 风格降为参考，不强制
+        var preset = StylePresets.GetPreset(currentStyle);
+        sb.AppendLine($"【风格参考（非强制）】{GetCurrentStyleDisplayName()}，BPM范围{preset.bpmMin}-{preset.bpmMax}，仅供参考，可根据情绪自由调整。");
+
+        return sb.ToString();
+    }
     void OnContinueGenerate()
     {
         isNewRequest = false;
@@ -130,7 +153,7 @@ public class AIChatManager : MonoBehaviour
         string prompt = $"【续写任务】\n" +
             $"上一段已生成 {bars} 小节。\n" +
             $"上一段结尾音符：{lastContext}\n" +
-            $"必须保持同样速度 BPM={lastBpm}，同样调式 {currentKeySignature} 大调，风格 {GetCurrentStyleDisplayName()}。\n" +
+            $"必须保持同样速度 BPM={lastBpm}，同样调式 {currentKeySignature}，风格 {GetCurrentStyleDisplayName()}。\n" +  // 去掉"大调"
             $"严格要求：\n" +
             $"1. 旋律必须紧接上一段结尾自然延续\n" +
             $"2. 第一个音符的 start_tick 必须是 0\n" +
@@ -236,7 +259,7 @@ public class AIChatManager : MonoBehaviour
 
     void ProcessScoreJson(string json, bool clearFirst)
     {
-        ScoreDataRaw raw = JsonUtility.FromJson < ScoreDataRaw > (json);
+        ScoreDataRaw raw = JsonUtility.FromJson<ScoreDataRaw>(json);
         if (raw == null || raw.notes == null || raw.notes.Length == 0)
         {
             AppendChat("系统", "乐谱解析失败或为空", "#FF6666");
@@ -252,7 +275,9 @@ public class AIChatManager : MonoBehaviour
             notes = raw.notes
         };
 
-        data = ScoreValidator.Validate(data, currentKeySignature);
+        // 关键修改：优先用 AI 返回的调式校验，而不是本地默认值
+        string validationKey = data.key_signature ?? currentKeySignature;
+        data = ScoreValidator.Validate(data, validationKey);
         if (data.notes.Length == 0)
         {
             AppendChat("系统", "校验后无有效音符", "#FF6666");
@@ -289,7 +314,6 @@ public class AIChatManager : MonoBehaviour
         btnGenerate.gameObject.SetActive(false);
         SetMusicControlButtonsActive(true);
     }
-
     void OnSaveScore()
     {
         if (sessionExportNotes.Count == 0)
@@ -455,64 +479,29 @@ public class AIChatManager : MonoBehaviour
 
     string BuildSystemPrompt()
     {
-        var preset = StylePresets.GetPreset(currentStyle);
-        string userReqSection = "";
-        if (!string.IsNullOrEmpty(parsedKeySignature))
-            userReqSection += $"【用户指定调式】{currentKeySignature}。必须严格使用此调式，禁止擅自改回C大调。\n";
-        if (!string.IsNullOrEmpty(userStartNote))
-            userReqSection += $"【用户指定起始音】第一个音符必须是{userStartNote}（key_number={GetKeyNumberFromName(userStartNote)}），禁止从其他音开始。\n";
-
-        return "你是一位专业的88键钢琴编曲AI。\n\n" +
-               "【输出格式】\n" +
+        return "你是一位专业的88键钢琴编曲AI。请根据用户的描述创作钢琴独奏。\n\n" +
+               "【输出格式 - 必须严格遵守】\n" +
                "1. 只输出```json代码块，块外不要有任何文字\n" +
                "2. 字段：key_number(1-88), velocity(1-127), start_tick(int,≥0), duration_tick(int,≥1)\n" +
                "3. 必须包含：bpm, key_signature, total_bars\n" +
                "4. 1 tick = 1个十六分音符，1小节 = 16 tick\n" +
                "5. 最多64个Note（约4小节）\n\n" +
 
-               "【和声与调式】\n" +
-               userReqSection +
-               $"当前调式：{currentKeySignature}大调\n" +
-               $"可选和弦进行（每段任选一套，可混搭）：{preset.chordProgression}\n" +
-               "- 右手旋律优先使用和弦内音（根音、三音、五音、七音）\n" +
-               "- 可以使用黑键（半音）作为经过音和色彩音：相邻白键之间（如 D→E 用 D#，F→G 用 F#，A→B 用 A#）可以使用黑键过渡,但不是必须得\n" +
-               "- 经过音规则：duration_tick=1，velocity≤50，像\"滑过\"一样轻触；每小节至少1处、最多3处经过音\n" +
-               "- 允许调式借用：偶尔使用调外黑键（如 C大调里用 G# 或 C#）作为色彩音，增加旋律张力，但必须是短音且弱奏\n\n"+
-
-               "【旋律自由度】\n" +
-               "1. 动机发展：先设计一个2~4个音的短动机，然后在后续小节对其进行变化\n" +
-               "   - 模进：动机整体移高或移低若干音程\n" +
-               "   - 节奏变化：把长音拆成短音，或把短音合并成长音\n" +
-               "   - 倒影：把动机音高上下翻转\n" +
-               "2. 弱起与留白：旋律可以从弱拍进入（start_tick=2/4/6），不要每小节第1 tick都必须有音\n" +
-               "   - 允许整小节只有左手伴奏，右手旋律休止\n" +
-               "3. 旋律线不要太平：允许跳进（如从C4跳到G4），不要总是一个音阶一个音阶爬\n\n" +
-
-               "【声部分配】\n" +
-               "1. 右手旋律（key_number ≥ 44）：velocity 70-110\n" +
-               "   - 大部分时间同一tick只有1个音，但允许偶尔的双音\n" +
-               "   - 旋律音的 duration_tick 可以变化：1（短促）、2（八分）、4（四分）、6（附点）\n" +
-               "2. 左手伴奏（key_number ≤ 43）：velocity 40-70\n" +
-               "   - 柱式和弦：多个音写在同一 start_tick\n" +
-               "   - 分解和弦/琶音：同一和弦内 start_tick 依次递增 0,1,2,3\n" +
-               "   - 低音长音可以跨越多个小节（duration_tick=16或更长）\n" +
-               "3. 双手配合：\n" +
-               "   - 强拍（tick=0）可以只有左手根音，右手旋律延后2~4 tick进入\n" +
-               "   - 同一tick最多5个音\n\n" +
+               "【声部基础规则】\n" +
+               "- 右手旋律（key_number ≥ 44）：velocity 70-110，同一时间通常1个音，偶尔双音\n" +
+               "- 左手伴奏（key_number ≤ 43）：velocity 40-70，柱式和弦或分解和弦\n" +
+               "- 同一tick最多5个音\n\n" +
 
                "【节奏与休止】\n" +
                "- 不要填满所有tick，适当留白\n" +
                "- 允许附点节奏（duration_tick=3, 6, 12）\n" +
                "- 允许切分：强拍休止，弱拍进音\n\n" +
 
-               $"【风格参数】{GetCurrentStyleDisplayName()}，BPM {preset.bpmMin}-{preset.bpmMax}\n" +
-               $"【力度轮廓】{preset.dynamicsProfile}\n\n" +
-
                "【禁止】\n" +
                "- 禁止key_number超出1-88\n" +
                "- 禁止velocity为0或>127\n" +
                "- 禁止duration_tick=0\n" +
-               "- 禁止连续4小节使用完全相同的旋律，必须有变化";
+               "- 禁止连续4小节使用完全相同的旋律";
     }
 
     string BuildRequestBody(string system, string user)
@@ -583,6 +572,14 @@ public class AIChatManager : MonoBehaviour
 
     void ScrollToBottom()
     {
+        if (chatScrollRect == null) return;
+
+        // 强制刷新布局，确保 Content 高度已更新
         Canvas.ForceUpdateCanvases();
+        LayoutRebuilder.ForceRebuildLayoutImmediate(chatScrollRect.content);
+        Canvas.ForceUpdateCanvases();
+
+        // 滚到底部（0 表示最底，1 表示最顶）
+        chatScrollRect.verticalNormalizedPosition = 0f;
     }
 }

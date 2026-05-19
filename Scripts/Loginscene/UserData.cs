@@ -8,7 +8,7 @@ public class UserData
     public string passwordHash;      // MD5 哈希，不存明文
     public long registerTime;        // 注册时间戳
     public List<ScoreIndexEntry> scoreIndex; // 乐谱索引列表，为后续功能预留
-
+    public string avatarPath;        // 头像本地文件路径
     public UserData(string name, string hash)
     {
         username = name;

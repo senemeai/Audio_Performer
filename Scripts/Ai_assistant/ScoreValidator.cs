@@ -20,24 +20,23 @@ public static class ScoreValidator
         var rawNotes = input.GetNotesAsList();
         var validNotes = new List< NoteEvent > ();
 
-        // 1. 调式校验 + 格式清理
-        var allowedKeys = GetAllowedKeys(keySignature);
+        // 修改：优先用乐谱自己声明的调式，其次用外部传入的
+        string effectiveKey = input.key_signature ?? keySignature ?? "C";
+        var allowedKeys = GetAllowedKeys(effectiveKey);
 
         foreach (var note in rawNotes)
         {
             if (note.key_number < 1 || note.key_number > 88) continue;
 
-            // 【关键修改】左手伴奏（低音区）强制调内音，保证和弦和谐
+            // 左手伴奏强制调内音
             if (note.key_number <= 43 && !allowedKeys.Contains(note.key_number))
                 note.key_number = SnapToNearest(note.key_number, allowedKeys);
-            // 右手旋律：允许黑键作为经过音/色彩音，只有偏离调内音超过1个半音才修正
+            // 右手旋律：允许经过音/色彩音，偏离超过2个半音才修正
             else if (note.key_number >= 44 && !allowedKeys.Contains(note.key_number))
             {
                 int nearest = SnapToNearest(note.key_number, allowedKeys);
-                // 与最近调内音距离 > 1 个半音，说明不是合理的经过音，强制修正
                 if (Mathf.Abs(note.key_number - nearest) > 2)
                     note.key_number = nearest;
-                // 否则保留黑键（如 D# 作为 D→E 的经过音）
             }
 
             note.velocity = Mathf.Clamp(note.velocity, 1, 127);
@@ -49,7 +48,7 @@ public static class ScoreValidator
         // 2. 密度过滤（同一 tick 最多 6 个音）
         validNotes = FilterDensity(validNotes, 6);
 
-        // 3. 强制旋律单音/双音约束（防止和弦堆叠混乱）
+        // 3. 强制旋律单音/双音约束
         validNotes = EnforceMelodySingleNote(validNotes);
 
         // 4. 时间排序
