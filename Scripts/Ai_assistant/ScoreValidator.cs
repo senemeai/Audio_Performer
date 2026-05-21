@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using PianoComposition;
 
 public static class ScoreValidator
 {
@@ -18,9 +19,8 @@ public static class ScoreValidator
         };
 
         var rawNotes = input.GetNotesAsList();
-        var validNotes = new List< NoteEvent > ();
+        var validNotes = new List<NoteEvent>();
 
-        // 修改：优先用乐谱自己声明的调式，其次用外部传入的
         string effectiveKey = input.key_signature ?? keySignature ?? "C";
         var allowedKeys = GetAllowedKeys(effectiveKey);
 
@@ -28,10 +28,8 @@ public static class ScoreValidator
         {
             if (note.key_number < 1 || note.key_number > 88) continue;
 
-            // 左手伴奏强制调内音
             if (note.key_number <= 43 && !allowedKeys.Contains(note.key_number))
                 note.key_number = SnapToNearest(note.key_number, allowedKeys);
-            // 右手旋律：允许经过音/色彩音，偏离超过2个半音才修正
             else if (note.key_number >= 44 && !allowedKeys.Contains(note.key_number))
             {
                 int nearest = SnapToNearest(note.key_number, allowedKeys);
@@ -45,21 +43,22 @@ public static class ScoreValidator
             validNotes.Add(note);
         }
 
-        // 2. 密度过滤（同一 tick 最多 6 个音）
         validNotes = FilterDensity(validNotes, 6);
-
-        // 3. 强制旋律单音/双音约束
         validNotes = EnforceMelodySingleNote(validNotes);
-
-        // 4. 时间排序
         validNotes.Sort((a, b) => a.start_tick.CompareTo(b.start_tick));
 
-        // 5. 琶音标记
+        // 应用织体优化
+        validNotes = OptimizeLeftHandTexture(validNotes, input.style);
+
+        // 标记琶音延迟
         MarkArpeggio(validNotes);
 
         output.notes = validNotes.ToArray();
+        output = ApplyMusicalPolish(output);
+
         return output;
     }
+
     static List<int> GetAllowedKeys(string keySig)
     {
         bool isMinor = keySig.EndsWith("m") || keySig.Contains("小调");
@@ -67,8 +66,8 @@ public static class ScoreValidator
 
         int rootIndex = NoteNameToSemitone(root);
         int[] intervals = isMinor
-            ? new int[] { 0, 2, 3, 5, 7, 8, 10 }  // 自然小调：全半全全半全全
-            : new int[] { 0, 2, 4, 5, 7, 9, 11 }; // 大调：全全半全全全半
+            ? new int[] { 0, 2, 3, 5, 7, 8, 10 }
+            : new int[] { 0, 2, 4, 5, 7, 9, 11 };
 
         var allowed = new List<int>();
         foreach (int iv in intervals)
@@ -129,10 +128,6 @@ public static class ScoreValidator
         return result;
     }
 
-    /// <summary>
-    /// 强制右手旋律区域（key_number >= 44）同一时刻最多 2 个音
-    /// 允许双音（如三度、六度），禁止三音以上的右手和弦
-    /// </summary>
     static List<NoteEvent> EnforceMelodySingleNote(List<NoteEvent> notes)
     {
         var result = new List<NoteEvent>();
@@ -144,10 +139,8 @@ public static class ScoreValidator
             var rightHandNotes = list.Where(n => n.key_number >= 44).ToList();
             var leftHandNotes = list.Where(n => n.key_number <= 43).ToList();
 
-            // 右手（旋律）同一时刻最多保留 2 个音（允许双音，禁止三音以上和弦）
             if (rightHandNotes.Count > 2)
             {
-                // 保留力度最大的 2 个音
                 rightHandNotes = rightHandNotes.OrderByDescending(n => n.velocity).Take(2).ToList();
             }
 
@@ -158,68 +151,225 @@ public static class ScoreValidator
         return result.OrderBy(n => n.start_tick).ToList();
     }
 
-    /// <summary>
-    /// 智能琶音标记：
-    /// - 左手和弦（≥3个音）：25ms 间隔琶音
-    /// - 右手双音：3ms 轻微延迟（几乎同时）
-    /// - 单音：无延迟
-    /// - 右手三音以上：已被 EnforceMelodySingleNote 过滤，不会出现
-    /// </summary>
+    // 新增：优化左手织体
+    static List<NoteEvent> OptimizeLeftHandTexture(List<NoteEvent> notes, string style)
+    {
+        var result = new List<NoteEvent>();
+        var notesByMeasure = notes.GroupBy(n => n.start_tick / 16).ToList();
+
+        var textureSequence = TextureLibrary.GetTextureSequence(style);
+
+        for (int m = 0; m < notesByMeasure.Count && m < textureSequence.Count; m++)
+        {
+            var measure = notesByMeasure[m].ToList();
+            var leftHand = measure.Where(n => n.key_number <= 43).ToList();
+            var rightHand = measure.Where(n => n.key_number >= 44).ToList();
+
+            // 右手旋律直接添加
+            result.AddRange(rightHand);
+
+            // 左手应用织体优化
+            if (leftHand.Count >= 3)
+            {
+                var optimizedLeft = ApplyTextureToChord(leftHand, textureSequence[m], style, m);
+                result.AddRange(optimizedLeft);
+            }
+            else if (leftHand.Count == 2)
+            {
+                // 双音：简单处理
+                foreach (var note in leftHand)
+                {
+                    note.arpeggioDelay = 0.01f;
+                    result.Add(note);
+                }
+            }
+            else if (leftHand.Count == 1)
+            {
+                result.AddRange(leftHand);
+            }
+        }
+
+        return result.OrderBy(n => n.start_tick).ToList();
+    }
+
+    static List<NoteEvent> ApplyTextureToChord(List<NoteEvent> chordNotes, TextureType texture, string style, int measureIndex)
+    {
+        var result = new List<NoteEvent>();
+        if (chordNotes.Count == 0) return result;
+
+        chordNotes = chordNotes.OrderBy(n => n.key_number).ToList();
+
+        // 尝试应用经典分解模式
+        if (texture == TextureType.Broken || texture == TextureType.Alberti)
+        {
+            var brokenResult = ApplyClassicBrokenPattern(chordNotes, measureIndex * 16, style, measureIndex);
+            if (brokenResult != null && brokenResult.Count > 0)
+                return brokenResult;
+        }
+
+        // 回退到普通织体处理
+        var triggerTicks = TextureLibrary.GetTriggerTicks(texture, chordNotes.Count);
+        var interNoteDelay = TextureLibrary.GetDelayBetweenNotes(texture);
+
+        for (int i = 0; i < chordNotes.Count; i++)
+        {
+            var original = chordNotes[i];
+            var newNote = new NoteEvent
+            {
+                key_number = original.key_number,
+                velocity = AdjustVelocityForTexture(original.velocity, texture, i, chordNotes.Count),
+                start_tick = original.start_tick,
+                duration_tick = original.duration_tick,
+                arpeggioDelay = (i < triggerTicks.Count ? triggerTicks[i] * 0.01f : 0) + (i * interNoteDelay)
+            };
+            result.Add(newNote);
+        }
+
+        return result;
+    }
+
+    static List<NoteEvent> ApplyClassicBrokenPattern(List<NoteEvent> chordNotes, int measureStartTick, string style, int measureIndex)
+    {
+        if (chordNotes.Count < 3) return null;
+
+        chordNotes = chordNotes.OrderBy(n => n.key_number).ToList();
+
+        int rootKey = chordNotes[0].key_number;
+        int thirdKey = chordNotes[1].key_number;
+        int fifthKey = chordNotes[2].key_number;
+
+        int interval1 = thirdKey - rootKey;
+        int interval2 = fifthKey - thirdKey;
+
+        if ((interval1 != 3 && interval1 != 4) || (interval2 != 3 && interval2 != 4))
+        {
+            return null;
+        }
+
+        var pattern = TextureLibrary.GetRecommendedBrokenPattern(style, measureIndex);
+        int avgVelocity = (int)chordNotes.Average(n => n.velocity);
+
+        return TextureLibrary.GenerateBrokenChord(
+            rootKey, thirdKey, fifthKey, pattern,
+            measureStartTick, avgVelocity, 12
+        );
+    }
+
+    static int AdjustVelocityForTexture(int originalVel, TextureType texture, int noteIndex, int totalNotes)
+    {
+        switch (texture)
+        {
+            case TextureType.Homophonic:
+                return Mathf.Clamp(originalVel, 50, 80);
+            case TextureType.Broken:
+                if (noteIndex == 0) return Mathf.Clamp(originalVel + 5, 55, 85);
+                return Mathf.Clamp(originalVel - 5, 45, 70);
+            case TextureType.Alberti:
+                if (noteIndex == 0) return Mathf.Clamp(originalVel + 10, 60, 90);
+                return Mathf.Clamp(originalVel - 10, 40, 65);
+            case TextureType.Walking:
+                return Mathf.Clamp(originalVel + 8, 55, 85);
+            default:
+                return originalVel;
+        }
+    }
+
     static void MarkArpeggio(List<NoteEvent> notes)
     {
-        // 按 start_tick 分组
         var groups = notes.GroupBy(n => n.start_tick).ToList();
 
         foreach (var g in groups)
         {
             var list = g.OrderBy(n => n.key_number).ToList();
 
-            // 判断是否为左手和弦（低音区，3个音以上）
             bool isLeftHandChord = list.All(n => n.key_number <= 43) && list.Count >= 3;
-            // 判断是否为右手双音
-            bool isRightHandDouble = list.All(n => n.key_number >= 44) && list.Count == 2;
 
-            if (isLeftHandChord)
+            if (isLeftHandChord && list.Count == 3)
             {
-                // 左手和弦：25ms 间隔琶音，让和弦听起来更圆润
-                for (int i = 0; i < list.Count; i++)
-                    list[i].arpeggioDelay = i * 0.025f;
+                float[] classicDelays = { 0f, 0.015f, 0.028f, 0.038f };
+                for (int i = 0; i < list.Count && i < classicDelays.Length; i++)
+                {
+                    list[i].arpeggioDelay = classicDelays[i];
+                }
             }
-            else if (isRightHandDouble)
+            else if (isLeftHandChord && list.Count > 3)
             {
-                // 右手双音：3ms 轻微延迟（模拟真实钢琴无法绝对同时的物理特性）
-                // 几乎听不出，但能让声音略微自然
+                for (int i = 0; i < list.Count; i++)
+                    list[i].arpeggioDelay = i * 0.012f;
+            }
+            else if (list.Count == 2 && list.All(n => n.key_number >= 44))
+            {
                 for (int i = 0; i < list.Count; i++)
                     list[i].arpeggioDelay = i * 0.003f;
             }
-            else if (list.Count > 1 && list.Any(n => n.key_number <= 43) && list.Any(n => n.key_number >= 44))
-            {
-                // 混合手位（左右手同时按）：低音优先触发（先左后右）
-                var left = list.Where(n => n.key_number <= 43).OrderBy(n => n.key_number).ToList();
-                var right = list.Where(n => n.key_number >= 44).OrderBy(n => n.key_number).ToList();
-                float delay = 0f;
-                foreach (var note in left)
-                {
-                    note.arpeggioDelay = delay;
-                    delay += 0.015f;
-                }
-                foreach (var note in right)
-                {
-                    note.arpeggioDelay = delay;
-                    delay += 0.008f;
-                }
-            }
             else if (list.Count > 1)
             {
-                // 其他情况（如同区域双音）：轻微延迟
                 for (int i = 0; i < list.Count; i++)
                     list[i].arpeggioDelay = i * 0.005f;
             }
             else
             {
-                // 单音：无延迟
-                list[0].arpeggioDelay = 0f;
+                if (list.Count > 0)
+                    list[0].arpeggioDelay = 0f;
             }
         }
+    }
+
+    static ScoreData ApplyMusicalPolish(ScoreData data)
+    {
+        if (data?.notes == null || data.notes.Length == 0) return data;
+
+        var notes = data.notes.ToList();
+        var groupedByMeasure = notes.GroupBy(n => n.start_tick / 16).ToList();
+
+        for (int measureIndex = 0; measureIndex < groupedByMeasure.Count && measureIndex < 4; measureIndex++)
+        {
+            int targetVel = measureIndex switch
+            {
+                0 => Random.Range(65, 75),
+                1 => Random.Range(75, 85),
+                2 => Random.Range(85, 100),
+                3 => Random.Range(60, 80),
+                _ => 75
+            };
+
+            foreach (var note in groupedByMeasure[measureIndex])
+            {
+                if (note.key_number >= 44)
+                    note.velocity = Mathf.Clamp(targetVel + Random.Range(-5, 5), 60, 110);
+                else
+                    note.velocity = Mathf.Clamp(targetVel - Random.Range(15, 25), 40, 70);
+            }
+        }
+
+        data.notes = notes.OrderBy(n => n.start_tick).ToArray();
+        return data;
+    }
+
+    public static string GetTexturePromptText(string style)
+    {
+        var sequence = TextureLibrary.GetTextureSequence(style);
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("【左手伴奏织体安排（4小节）】");
+
+        string[] textureNames = { "柱式和弦", "分解和弦", "阿尔贝蒂低音", "琶音", "行走低音", "交替织体" };
+
+        for (int i = 0; i < sequence.Count && i < 4; i++)
+        {
+            string name = textureNames[(int)sequence[i]];
+            string desc = TextureLibrary.Textures[sequence[i]].description;
+            sb.AppendLine($"小节{i + 1}：{name} - {desc}");
+        }
+
+        sb.AppendLine("\n【经典分解模式 - 最重要】");
+        sb.AppendLine("请使用【根→五→高根→高三】模式，例如C大三和弦：");
+        sb.AppendLine("- 第1个音：C2（根音）→ tick 0");
+        sb.AppendLine("- 第2个音：G2（五音）→ tick 4");
+        sb.AppendLine("- 第3个音：C3（高八度根音）→ tick 8");
+        sb.AppendLine("- 第4个音：E3（高八度三音）→ tick 12");
+        sb.AppendLine("这种模式好听的原因：根音到五音是纯五度跳跃，音响开阔；五音到高八度根音又是五度，音区扩展；高八度根音到高八度三音是三度，温柔收尾。");
+        sb.AppendLine("\n【禁止】不要使用简单的1-3-5-1或1-2-3-1均分模式，这些听感很一般。");
+
+        return sb.ToString();
     }
 }

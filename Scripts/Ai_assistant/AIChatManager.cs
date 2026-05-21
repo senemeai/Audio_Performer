@@ -8,6 +8,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
+using PianoComposition;
 
 public class AIChatManager : MonoBehaviour
 {
@@ -32,7 +33,7 @@ public class AIChatManager : MonoBehaviour
     public string apiKey = "sk-your-key-here";
     public string modelName = "deepseek-chat";
 
-    private string currentStyle = "Pop"; // 内部英文Key
+    private string currentStyle = "Pop";
     private string currentKeySignature = "C";
     private StringBuilder chatHistory = new StringBuilder();
 
@@ -47,14 +48,13 @@ public class AIChatManager : MonoBehaviour
 
     private string userStartNote = "";
     private string parsedKeySignature = "";
-    private ScrollRect chatScrollRect;
+
     void Start()
     {
         chatPanel.SetActive(false);
         SetupStyleDropdown();
         SetupButtons();
-        chatScrollRect = chatPanel.GetComponentInChildren < ScrollRect > (true);
-        // 关键修改：导入按钮始终显示，其他乐谱控制按钮默认隐藏
+
         btnImportScore.gameObject.SetActive(true);
         SetMusicControlButtonsActive(false);
         btnGenerate.gameObject.SetActive(false);
@@ -76,7 +76,6 @@ public class AIChatManager : MonoBehaviour
         currentStyle = StylePresets.Names[index];
     }
 
-    // 获取当前风格的中文显示名（用于保存到索引库）
     string GetCurrentStyleDisplayName()
     {
         int idx = System.Array.IndexOf(StylePresets.Names, currentStyle);
@@ -118,32 +117,9 @@ public class AIChatManager : MonoBehaviour
         sessionTotalBars = 0;
 
         AppendChat("AI", " 正在为您编曲，请稍候...", "#FFCC66");
-
-        // 修改：构建带约束的用户消息
-        string finalUserMessage = BuildUserMessage(msg);
-        StartCoroutine(RequestAI(finalUserMessage));
+        StartCoroutine(RequestAI(msg));
     }
-    string BuildUserMessage(string originalMsg)
-    {
-        var sb = new StringBuilder();
-        sb.AppendLine(originalMsg);
 
-        // 用户明确指定的约束 → 强制
-        if (!string.IsNullOrEmpty(parsedKeySignature))
-        {
-            sb.AppendLine($"【强制约束】调式必须是 {currentKeySignature}，禁止擅自更改。");
-        }
-        if (!string.IsNullOrEmpty(userStartNote))
-        {
-            sb.AppendLine($"【强制约束】起始音必须是 {userStartNote}（key_number={GetKeyNumberFromName(userStartNote)}）。");
-        }
-
-        // 风格降为参考，不强制
-        var preset = StylePresets.GetPreset(currentStyle);
-        sb.AppendLine($"【风格参考（非强制）】{GetCurrentStyleDisplayName()}，BPM范围{preset.bpmMin}-{preset.bpmMax}，仅供参考，可根据情绪自由调整。");
-
-        return sb.ToString();
-    }
     void OnContinueGenerate()
     {
         isNewRequest = false;
@@ -153,11 +129,12 @@ public class AIChatManager : MonoBehaviour
         string prompt = $"【续写任务】\n" +
             $"上一段已生成 {bars} 小节。\n" +
             $"上一段结尾音符：{lastContext}\n" +
-            $"必须保持同样速度 BPM={lastBpm}，同样调式 {currentKeySignature}，风格 {GetCurrentStyleDisplayName()}。\n" +  // 去掉"大调"
+            $"必须保持同样速度 BPM={lastBpm}，同样调式 {currentKeySignature} 大调，风格 {GetCurrentStyleDisplayName()}。\n" +
             $"严格要求：\n" +
             $"1. 旋律必须紧接上一段结尾自然延续\n" +
             $"2. 第一个音符的 start_tick 必须是 0\n" +
-            $"3. 直接输出 JSON，不要任何文字说明";
+            $"3. 左手伴奏使用经典分解模式（根→五→高根→高三）\n" +
+            $"4. 直接输出 JSON，不要任何文字说明";
 
         AppendChat("系统", " 正在续写下一段乐谱...", "#66FFFF");
         StartCoroutine(RequestAI(prompt));
@@ -270,14 +247,12 @@ public class AIChatManager : MonoBehaviour
         {
             bpm = raw.bpm,
             key_signature = raw.key_signature,
-            style = raw.style,
+            style = raw.style ?? currentStyle,
             total_bars = raw.total_bars,
             notes = raw.notes
         };
 
-        // 关键修改：优先用 AI 返回的调式校验，而不是本地默认值
-        string validationKey = data.key_signature ?? currentKeySignature;
-        data = ScoreValidator.Validate(data, validationKey);
+        data = ScoreValidator.Validate(data, currentKeySignature);
         if (data.notes.Length == 0)
         {
             AppendChat("系统", "校验后无有效音符", "#FF6666");
@@ -290,6 +265,7 @@ public class AIChatManager : MonoBehaviour
             sessionTotalBars = 0;
             sessionBpm = data.bpm;
         }
+
         int tickOffset = sessionTotalBars * 16;
         foreach (var note in data.notes)
         {
@@ -303,7 +279,7 @@ public class AIChatManager : MonoBehaviour
         }
         sessionTotalBars += data.total_bars;
 
-        lastSegmentNotes = new List< NoteEvent > (data.notes);
+        lastSegmentNotes = new List<NoteEvent>(data.notes);
         lastBpm = data.bpm;
 
         ScorePlayer.Instance.AppendScore(data, clearFirst);
@@ -314,6 +290,7 @@ public class AIChatManager : MonoBehaviour
         btnGenerate.gameObject.SetActive(false);
         SetMusicControlButtonsActive(true);
     }
+
     void OnSaveScore()
     {
         if (sessionExportNotes.Count == 0)
@@ -340,7 +317,7 @@ public class AIChatManager : MonoBehaviour
         {
             displayName = Path.GetFileNameWithoutExtension(path),
             filePath = path,
-            style = GetCurrentStyleDisplayName(), // 存中文，方便筛选
+            style = GetCurrentStyleDisplayName(),
             totalBars = sessionTotalBars,
             saveTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             remark = ""
@@ -356,7 +333,7 @@ public class AIChatManager : MonoBehaviour
         if (string.IsNullOrEmpty(path)) return;
 
         string json = File.ReadAllText(path);
-        var raw = JsonUtility.FromJson < ScoreDataRaw > (json);
+        var raw = JsonUtility.FromJson<ScoreDataRaw>(json);
         if (raw == null || raw.notes == null || raw.notes.Length == 0)
         {
             AppendChat("系统", "导入文件格式无效或为空", "#FF6666");
@@ -376,32 +353,20 @@ public class AIChatManager : MonoBehaviour
         ScorePlayer.Instance.Clear();
         ScorePlayer.Instance.AppendScore(data, true);
 
-        sessionExportNotes = new List< NoteEvent > (data.notes);
+        sessionExportNotes = new List<NoteEvent>(data.notes);
         sessionTotalBars = data.total_bars;
         sessionBpm = data.bpm;
 
         AppendChat("系统", $"已导入并加载：{Path.GetFileName(path)}，共{data.notes.Length}个音符。点击演奏试听。", "#66FFFF");
         btnGenerate.gameObject.SetActive(false);
         SetMusicControlButtonsActive(true);
-
-        var entry = new ScoreIndexEntry
-        {
-            displayName = Path.GetFileNameWithoutExtension(path),
-            filePath = path,
-            style = raw.style ?? GetCurrentStyleDisplayName(),
-            totalBars = data.total_bars,
-            saveTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-            remark = "外部导入"
-        };
-        AddScoreIndex(entry);
     }
 
-    // 关键修复：相同路径去重，有则更新，无则新增
     void AddScoreIndex(ScoreIndexEntry entry)
     {
         if (LoginRegisterManager.CurrentUser == null) return;
         if (LoginRegisterManager.CurrentUser.scoreIndex == null)
-            LoginRegisterManager.CurrentUser.scoreIndex = new List< ScoreIndexEntry > ();
+            LoginRegisterManager.CurrentUser.scoreIndex = new List<ScoreIndexEntry>();
 
         var existing = LoginRegisterManager.CurrentUser.scoreIndex.Find(x => x.filePath == entry.filePath);
         if (existing != null)
@@ -467,48 +432,63 @@ public class AIChatManager : MonoBehaviour
         if (txt != null) txt.text = paused ? "继续" : "暂停";
     }
 
-    // 关键修改：只控制与"当前乐谱"相关的按钮，不包含 ImportScore
     void SetMusicControlButtonsActive(bool active)
     {
         btnPlay.gameObject.SetActive(active);
         btnPause.gameObject.SetActive(active);
         btnContinueGen.gameObject.SetActive(active);
         btnSaveScore.gameObject.SetActive(active);
-        // btnImportScore 不在这里控制，始终独立显示
     }
 
     string BuildSystemPrompt()
     {
-        return "你是一位专业的88键钢琴编曲AI。请根据用户的描述创作钢琴独奏。\n\n" +
-               "【输出格式 - 必须严格遵守】\n" +
+        var preset = StylePresets.GetPreset(currentStyle);
+        string texturePrompt = ScoreValidator.GetTexturePromptText(currentStyle);
+
+        string userReqSection = "";
+        if (!string.IsNullOrEmpty(parsedKeySignature))
+            userReqSection += $"【用户指定调式】{currentKeySignature}。必须严格使用此调式，禁止擅自改回C大调。\n";
+        if (!string.IsNullOrEmpty(userStartNote))
+            userReqSection += $"【用户指定起始音】第一个音符必须是{userStartNote}（key_number={GetKeyNumberFromName(userStartNote)}），禁止从其他音开始。\n";
+
+        return "你是一位专业的88键钢琴编曲AI，精通各种伴奏织体和经典分解模式。\n\n" +
+               "【输出格式】\n" +
                "1. 只输出```json代码块，块外不要有任何文字\n" +
                "2. 字段：key_number(1-88), velocity(1-127), start_tick(int,≥0), duration_tick(int,≥1)\n" +
-               "3. 必须包含：bpm, key_signature, total_bars\n" +
+               "3. 必须包含：bpm, key_signature, total_bars, style\n" +
                "4. 1 tick = 1个十六分音符，1小节 = 16 tick\n" +
-               "5. 最多64个Note（约4小节）\n\n" +
+               "5. 建议4小节，最多64个Note\n\n" +
 
-               "【声部基础规则】\n" +
-               "- 右手旋律（key_number ≥ 44）：velocity 70-110，同一时间通常1个音，偶尔双音\n" +
-               "- 左手伴奏（key_number ≤ 43）：velocity 40-70，柱式和弦或分解和弦\n" +
-               "- 同一tick最多5个音\n\n" +
+               texturePrompt + "\n\n" +
 
-               "【节奏与休止】\n" +
-               "- 不要填满所有tick，适当留白\n" +
-               "- 允许附点节奏（duration_tick=3, 6, 12）\n" +
-               "- 允许切分：强拍休止，弱拍进音\n\n" +
+               userReqSection +
+               $"当前调式：{currentKeySignature}\n" +
+               $"可选和弦进行：{preset.chordProgression}\n\n" +
+
+               "【右手旋律原则】\n" +
+               "1. 旋律要有起伏，不要一直在一个音区\n" +
+               "2. 每个乐句后要有呼吸（1-2 tick空白）\n" +
+               "3. 高潮在第三小节\n" +
+               "4. 旋律音 velocity 70-100\n\n" +
+
+               $"【风格参数】{GetCurrentStyleDisplayName()}，BPM {preset.bpmMin}-{preset.bpmMax}\n" +
+               $"【力度轮廓】{preset.dynamicsProfile}\n\n" +
 
                "【禁止】\n" +
                "- 禁止key_number超出1-88\n" +
                "- 禁止velocity为0或>127\n" +
                "- 禁止duration_tick=0\n" +
-               "- 禁止连续4小节使用完全相同的旋律";
+               "- 禁止连续4小节使用完全相同的旋律\n" +
+               "- 禁止使用简单的1-3-5-1或1-2-3-1均分分解模式\n\n" +
+
+               "现在请生成一段4小节、有织体变化、使用经典分解模式的钢琴曲。";
     }
 
     string BuildRequestBody(string system, string user)
     {
         string sys = EscapeJson(system);
         string usr = EscapeJson(user);
-        return $"{{\"model\":\"{modelName}\",\"temperature\":0.3,\"messages\":[{{\"role\":\"system\",\"content\":\"{sys}\"}},{{\"role\":\"user\",\"content\":\"{usr}\"}}]}}";
+        return $"{{\"model\":\"{modelName}\",\"temperature\":0.2,\"messages\":[{{\"role\":\"system\",\"content\":\"{sys}\"}},{{\"role\":\"user\",\"content\":\"{usr}\"}}]}}";
     }
 
     string EscapeJson(string s)
@@ -572,14 +552,6 @@ public class AIChatManager : MonoBehaviour
 
     void ScrollToBottom()
     {
-        if (chatScrollRect == null) return;
-
-        // 强制刷新布局，确保 Content 高度已更新
         Canvas.ForceUpdateCanvases();
-        LayoutRebuilder.ForceRebuildLayoutImmediate(chatScrollRect.content);
-        Canvas.ForceUpdateCanvases();
-
-        // 滚到底部（0 表示最底，1 表示最顶）
-        chatScrollRect.verticalNormalizedPosition = 0f;
     }
 }
